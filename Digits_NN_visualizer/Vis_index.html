@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Neural Network Digit Recognizer</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f4f4f9;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+        }
+
+        h1 { margin-bottom: 10px; color: #333; }
+        p { margin-bottom: 20px; color: #666; }
+
+        /* --- PREDICTION VISUALIZER (Top) --- */
+        .prediction-container {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 25px;
+            background: white;
+            padding: 15px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+
+        .pred-box {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: flex-end;
+            width: 40px;
+            height: 100px;
+            background-color: #eee;
+            border-radius: 4px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .pred-bar {
+            width: 100%;
+            background-color: #4CAF50; /* Green */
+            height: 0%;
+            transition: height 0.2s ease;
+            width: 100%;
+        }
+
+        .pred-label {
+            margin-top: 5px;
+            font-weight: bold;
+            font-size: 14px;
+        }
+
+        .pred-probability {
+            position: absolute;
+            bottom: 2px;
+            font-size: 10px;
+            color: #333;
+            z-index: 2;
+            background: rgba(255,255,255,0.8);
+            padding: 0 2px;
+            border-radius: 2px;
+        }
+
+        /* Highlight the winner */
+        .pred-box.winner .pred-bar { background-color: #2196F3; }
+        .pred-box.winner { border: 2px solid #2196F3; }
+
+        /* --- DRAWING GRID (Bottom) --- */
+        .grid-wrapper {
+            position: relative;
+            padding: 10px;
+            background: #333;
+            border-radius: 4px;
+            box-shadow: 0 10px 20px rgba(0,0,0,0.2);
+        }
+
+        .grid-container {
+            display: grid;
+            grid-template-columns: repeat(28, 12px); /* 28 columns, 12px each */
+            grid-template-rows: repeat(28, 12px);
+            gap: 1px;
+            background-color: #444;
+            cursor: crosshair;
+        }
+
+        .cell {
+            background-color: black; /* Default MNIST background is black */
+            width: 12px;
+            height: 12px;
+        }
+
+        .cell.active {
+            background-color: white; /* Drawing ink is white */
+        }
+
+        /* Controls */
+        .controls {
+            margin-top: 20px;
+            display: flex;
+            gap: 10px;
+        }
+
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            background-color: #fff;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            transition: all 0.2s;
+        }
+        button:hover { background-color: #e2e2e2; }
+        button.clear-btn { color: #d32f2f; border-color: #d32f2f; }
+        button.clear-btn:hover { background-color: #ffebee; }
+        
+        #status { margin-top: 10px; font-size: 12px; color: #888; }
+    </style>
+</head>
+<body>
+
+    <h1>Digit Recognizer</h1>
+    <p>Draw a digit (0-9) in the box below.</p>
+
+    <div class="prediction-container" id="predictionRow">
+        </div>
+
+    <div class="grid-wrapper">
+        <div class="grid-container" id="pixelGrid">
+            </div>
+    </div>
+
+    <div class="controls">
+        <button class="clear-btn" onclick="clearGrid()">Clear Board</button>
+    </div>
+    <div id="status">Loading Model...</div>
+
+    <script>
+        // --- CONFIGURATION ---
+        const GRID_SIZE = 28;
+        const TOTAL_PIXELS = GRID_SIZE * GRID_SIZE;
+        let model = null;
+        let isDrawing = false;
+        
+        // This array holds our raw pixel data (0 = black, 1 = white)
+        // We initialize with 0s.
+        const pixels = new Array(TOTAL_PIXELS).fill(0);
+
+        // --- DOM ELEMENTS ---
+        const gridContainer = document.getElementById('pixelGrid');
+        const predRow = document.getElementById('predictionRow');
+        const statusText = document.getElementById('status');
+
+        // --- INITIALIZATION ---
+        initUI();
+        loadModel();
+
+        // 1. Setup the UI (Grid & Prediction Bars)
+        function initUI() {
+            // A. Create Prediction Boxes
+            for (let i = 0; i < 10; i++) {
+                const box = document.createElement('div');
+                box.className = 'pred-box';
+                box.id = `box-${i}`;
+                box.innerHTML = `
+                    <div class="pred-bar" id="bar-${i}"></div>
+                    <div class="pred-probability" id="val-${i}">0%</div>
+                    <div class="pred-label">${i}</div>
+                `;
+                predRow.appendChild(box);
+            }
+
+            // B. Create 28x28 Grid
+            for (let i = 0; i < TOTAL_PIXELS; i++) {
+                const cell = document.createElement('div');
+                cell.className = 'cell';
+                cell.dataset.index = i;
+                
+                // Mouse Events
+                cell.addEventListener('mousedown', (e) => { 
+                    e.preventDefault(); // Prevent text selection
+                    isDrawing = true; 
+                    paint(cell); 
+                });
+                cell.addEventListener('mouseover', () => { 
+                    if (isDrawing) paint(cell); 
+                });
+                
+                // Touch Events (for mobile)
+                cell.addEventListener('touchstart', (e) => {
+                    e.preventDefault();
+                    isDrawing = true;
+                    paint(cell);
+                });
+                // Note: Touchmove is trickier on grids, keeping it simple for now.
+
+                gridContainer.appendChild(cell);
+            }
+            
+            // Global Mouse Up to stop drawing
+            document.body.addEventListener('mouseup', () => {
+                if (isDrawing) {
+                    isDrawing = false;
+                    runModel(); // Predict when user lifts mouse
+                }
+            });
+        }
+
+        // 2. Painting Logic
+        function paint(cell) {
+            const index = parseInt(cell.dataset.index);
+            
+            // Visual Update
+            cell.classList.add('active');
+            
+            // Data Update
+            pixels[index] = 1; 
+
+            // Optional: Add a "brush thickness" by coloring neighbors slightly
+            // This helps the model because single pixels are often too thin
+            const neighbors = [index-1, index+1, index-GRID_SIZE, index+GRID_SIZE];
+            neighbors.forEach(n => {
+                if (n >= 0 && n < TOTAL_PIXELS && pixels[n] === 0) {
+                    // We check boundaries loosely here for simplicity
+                    const neighborCell = gridContainer.children[n];
+                    if(neighborCell) {
+                        // Lightly activate neighbor (visual only for now, or full 1 for simplicity)
+                        // Let's just make it full 1 for robust input
+                         neighborCell.classList.add('active');
+                         pixels[n] = 1; 
+                    }
+                }
+            });
+        }
+
+        function clearGrid() {
+            // Reset Visuals
+            const cells = document.querySelectorAll('.cell');
+            cells.forEach(c => c.classList.remove('active'));
+            
+            // Reset Data
+            pixels.fill(0);
+            
+            // Reset Predictions
+            resetPredictions();
+        }
+
+        function resetPredictions() {
+            for(let i=0; i<10; i++) {
+                document.getElementById(`bar-${i}`).style.height = '0%';
+                document.getElementById(`val-${i}`).innerText = '0%';
+                document.getElementById(`box-${i}`).classList.remove('winner');
+            }
+        }
+
+        // 3. TensorFlow.js Logic
+        async function loadModel() {
+            try {
+                // Tries to load model.json from the same directory
+                model = await tf.loadLayersModel('./model.json');
+                statusText.innerText = "Model Loaded! Draw a digit.";
+                console.log("Model loaded successfully");
+            } catch (err) {
+                statusText.innerText = "Error loading model. Check console.";
+                console.error("Failed to load model:", err);
+                alert("Could not load model.json. Make sure you are running on a Local Server (localhost), not just opening the file directly.");
+            }
+        }
+
+        async function runModel() {
+            if (!model) return;
+
+            // tf.tidy cleans up tensors automatically to prevent memory leaks
+            const predictions = tf.tidy(() => {
+                // 1. Convert pixel array to Tensor
+                // Shape: [1, 28, 28, 1] (Batch, Height, Width, Channel)
+                const input = tf.tensor(pixels, [1, 28, 28, 1]);
+
+                // 2. Run prediction
+                const output = model.predict(input);
+
+                // 3. Get the data array
+                return output.dataSync();
+            });
+
+            updatePredictions(predictions);
+        }
+
+        function updatePredictions(probabilities) {
+            // Find the index with the highest probability
+            let maxProb = 0;
+            let winnerIndex = -1;
+
+            probabilities.forEach((prob, i) => {
+                const percent = (prob * 100).toFixed(1);
+                
+                // Update Bar Height
+                document.getElementById(`bar-${i}`).style.height = `${percent}%`;
+                // Update Text
+                document.getElementById(`val-${i}`).innerText = `${Math.round(percent)}%`;
+                
+                // Check winner
+                if (prob > maxProb) {
+                    maxProb = prob;
+                    winnerIndex = i;
+                }
+                
+                // Reset border
+                document.getElementById(`box-${i}`).classList.remove('winner');
+            });
+
+            // Highlight winner
+            if (winnerIndex !== -1) {
+                document.getElementById(`box-${winnerIndex}`).classList.add('winner');
+            }
+        }
+    </script>
+</body>
+</html>
